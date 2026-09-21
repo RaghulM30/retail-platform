@@ -49,9 +49,11 @@ pipeline {
             steps {
                 script {
                     def commit = bat(
-                        script: 'git rev-parse HEAD',
+                        script: '@git rev-parse HEAD',
                         returnStdout: true
                     ).trim()
+
+                    commit = commit.readLines().last().trim()
 
                     echo "Selected Git commit: ${commit}"
                 }
@@ -62,9 +64,11 @@ pipeline {
             steps {
                 script {
                     def tagExists = bat(
-                        script: "git tag -l v${params.VERSION}",
+                        script: "@git tag -l v${params.VERSION}",
                         returnStdout: true
                     ).trim()
+
+                    tagExists = tagExists.readLines().last().trim()
 
                     if (!tagExists) {
                         error("Git tag v${params.VERSION} does not exist")
@@ -100,18 +104,20 @@ pipeline {
                     def networkName = "retail-network"
 
                     /*
-                     * Record currently running image.
+                     * Capture the currently running Docker image.
                      */
                     def oldImage = bat(
-                        script: "docker inspect --format=\"{{.Config.Image}}\" ${containerName} 2>nul || echo NONE",
+                        script: "@docker inspect --format=\"{{.Config.Image}}\" ${containerName}",
                         returnStdout: true
                     ).trim()
+
+                    oldImage = oldImage.readLines().last().trim()
 
                     echo "Previous UAT image: ${oldImage}"
                     echo "New image: retail-app:${params.VERSION}"
 
                     /*
-                     * Save previous image for rollback.
+                     * Store previous image for automatic rollback.
                      */
                     env.OLD_IMAGE = oldImage
 
@@ -120,12 +126,12 @@ pipeline {
                     echo "Host port: 8081"
 
                     /*
-                     * Make sure Docker network exists.
+                     * Make sure network exists.
                      */
                     bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
 
                     /*
-                     * Remove current container.
+                     * Remove currently running container.
                      */
                     bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
 
@@ -178,15 +184,11 @@ pipeline {
                         echo "HEALTH CHECK FAILED"
                         echo "========================================="
 
-                        if (oldImage == "NONE" || oldImage == "") {
-                            error("Health check failed and no previous image is available for rollback.")
-                        }
-
                         echo "Starting automatic rollback..."
                         echo "Rollback image: ${oldImage}"
 
                         /*
-                         * Remove failed new version.
+                         * Remove failed version.
                          */
                         bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
 
@@ -204,7 +206,7 @@ pipeline {
                         bat "docker ps"
 
                         echo "Previous version started: ${oldImage}"
-                        echo "Checking rollback health..."
+                        echo "Waiting for rollback health check..."
 
                         /*
                          * Validate restored version.
@@ -219,10 +221,11 @@ pipeline {
                         echo "========================================="
 
                         /*
-                         * Deployment failed even though rollback succeeded.
-                         * This keeps the Jenkins build status FAILURE.
+                         * Deployment failed, even though rollback succeeded.
                          */
-                        error("Deployment failed. Automatic rollback completed successfully.")
+                        error(
+                            "Deployment failed. Automatic rollback completed successfully."
+                        )
                     }
                 }
             }
