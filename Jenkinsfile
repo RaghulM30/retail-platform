@@ -119,7 +119,8 @@ pipeline {
             bat "docker ps"
         }
     }
-    stage('Health Check') {
+}
+stage('Health Check') {
     when {
         expression {
             params.DEPLOYMENT_ACTION == 'DEPLOY'
@@ -139,7 +140,6 @@ pipeline {
             echo "Application health check PASSED"
         }
     }
-}
 }
     }
 
