@@ -88,59 +88,140 @@ pipeline {
         }
 
         stage('Deployment') {
-    when {
-        expression {
-            params.DEPLOYMENT_ACTION == 'DEPLOY'
+            when {
+                expression {
+                    params.DEPLOYMENT_ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+                script {
+                    def containerName = "retail-app-uat"
+                    def networkName = "retail-network"
+
+                    /*
+                     * Record currently running image before deployment.
+                     * If no container exists, use NONE.
+                     */
+                    def oldImage = bat(
+                        script: "docker inspect --format=\"{{.Config.Image}}\" ${containerName} 2>nul || echo NONE",
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Previous UAT image: ${oldImage}"
+                    echo "New image: retail-app:${params.VERSION}"
+
+                    echo "Container: ${containerName}"
+                    echo "Network: ${networkName}"
+                    echo "Host port: 8081"
+
+                    /*
+                     * Make sure Docker network exists.
+                     */
+                    bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
+
+                    /*
+                     * Remove existing container.
+                     */
+                    bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
+
+                    /*
+                     * Start requested version.
+                     */
+                    bat """
+                        docker run -d ^
+                        --name ${containerName} ^
+                        --network ${networkName} ^
+                        -p 8081:8081 ^
+                        retail-app:${params.VERSION}
+                    """
+
+                    bat "docker ps"
+
+                    echo "Deployment started successfully."
+                    echo "Previous image: ${oldImage}"
+                    echo "Current image : retail-app:${params.VERSION}"
+                }
+            }
         }
-    }
 
-    steps {
-        script {
-            def containerName = "retail-app-uat"
-            def networkName = "retail-network"
+        stage('Health Check') {
+            when {
+                expression {
+                    params.DEPLOYMENT_ACTION == 'DEPLOY'
+                }
+            }
 
-            echo "Deploying retail-app:${params.VERSION}"
-            echo "Container: ${containerName}"
-            echo "Network: ${networkName}"
-            echo "Host port: 8081"
+            steps {
+                script {
+                    def containerName = "retail-app-uat"
 
-            bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
+                    echo "Waiting for application health check..."
 
-            bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
+                    bat """
+                        powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
+                    """
 
-            bat """
-                docker run -d ^
-                --name ${containerName} ^
-                --network ${networkName} ^
-                -p 8081:8081 ^
-                retail-app:${params.VERSION}
-            """
-
-            bat "docker ps"
+                    echo "Application health check PASSED"
+                }
+            }
         }
-    }
-}
-stage('Health Check') {
-    when {
-        expression {
-            params.DEPLOYMENT_ACTION == 'DEPLOY'
+
+        stage('Rollback') {
+            when {
+                expression {
+                    params.DEPLOYMENT_ACTION == 'ROLLBACK'
+                }
+            }
+
+            steps {
+                script {
+                    def containerName = "retail-app-uat"
+                    def networkName = "retail-network"
+
+                    echo "Starting manual rollback..."
+                    echo "Rollback version: ${params.VERSION}"
+
+                    bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
+
+                    bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
+
+                    bat """
+                        docker run -d ^
+                        --name ${containerName} ^
+                        --network ${networkName} ^
+                        -p 8081:8081 ^
+                        retail-app:${params.VERSION}
+                    """
+
+                    bat "docker ps"
+
+                    echo "Rollback container started."
+                }
+            }
         }
-    }
 
-    steps {
-        script {
-            def containerName = "retail-app-uat"
+        stage('Rollback Health Check') {
+            when {
+                expression {
+                    params.DEPLOYMENT_ACTION == 'ROLLBACK'
+                }
+            }
 
-            echo "Waiting for application health check..."
+            steps {
+                script {
+                    def containerName = "retail-app-uat"
 
-            bat """
-                powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
-            """
+                    echo "Checking rollback health..."
 
-            echo "Application health check PASSED"
+                    bat """
+                        powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Rollback health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
+                    """
+
+                    echo "Rollback health check PASSED"
+                }
+            }
         }
-    }
-}
     }
 
     post {
