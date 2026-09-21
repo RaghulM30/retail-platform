@@ -119,6 +119,27 @@ pipeline {
             bat "docker ps"
         }
     }
+    stage('Health Check') {
+    when {
+        expression {
+            params.DEPLOYMENT_ACTION == 'DEPLOY'
+        }
+    }
+
+    steps {
+        script {
+            def containerName = "retail-app-uat"
+
+            echo "Waiting for application health check..."
+
+            bat """
+                powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
+            """
+
+            echo "Application health check PASSED"
+        }
+    }
+}
 }
     }
 
