@@ -49,11 +49,9 @@ pipeline {
             steps {
                 script {
                     def commit = bat(
-                        script: '@git rev-parse HEAD',
+                        script: 'git rev-parse HEAD',
                         returnStdout: true
                     ).trim()
-
-                    commit = commit.readLines().last().trim()
 
                     echo "Selected Git commit: ${commit}"
                 }
@@ -64,11 +62,9 @@ pipeline {
             steps {
                 script {
                     def tagExists = bat(
-                        script: "@git tag -l v${params.VERSION}",
+                        script: "git tag -l v${params.VERSION}",
                         returnStdout: true
                     ).trim()
-
-                    tagExists = tagExists.readLines().last().trim()
 
                     if (!tagExists) {
                         error("Git tag v${params.VERSION} does not exist")
@@ -104,20 +100,36 @@ pipeline {
                     def networkName = "retail-network"
 
                     /*
-                     * Capture the currently running Docker image.
+                     * Check whether the current container exists.
                      */
-                    def oldImage = bat(
-                        script: "@docker inspect --format=\"{{.Config.Image}}\" ${containerName}",
-                        returnStdout: true
-                    ).trim()
+                    def containerExists = bat(
+                        script: "docker inspect ${containerName} >nul 2>&1",
+                        returnStatus: true
+                    )
 
-                    oldImage = oldImage.readLines().last().trim()
+                    def oldImage = "NONE"
+
+                    /*
+                     * If the container exists, get its image.
+                     */
+                    if (containerExists == 0) {
+                        oldImage = bat(
+                            script: "docker inspect --format=\"{{.Config.Image}}\" ${containerName}",
+                            returnStdout: true
+                        ).trim()
+
+                        echo "Docker inspect returned: ${oldImage}"
+                    }
+
+                    if (!oldImage || oldImage == "") {
+                        oldImage = "NONE"
+                    }
 
                     echo "Previous UAT image: ${oldImage}"
                     echo "New image: retail-app:${params.VERSION}"
 
                     /*
-                     * Store previous image for automatic rollback.
+                     * Store previous image for rollback.
                      */
                     env.OLD_IMAGE = oldImage
 
@@ -131,12 +143,12 @@ pipeline {
                     bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
 
                     /*
-                     * Remove currently running container.
+                     * Remove current container.
                      */
                     bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
 
                     /*
-                     * Start new version.
+                     * Start requested version.
                      */
                     bat """
                         docker run -d ^
@@ -184,6 +196,12 @@ pipeline {
                         echo "HEALTH CHECK FAILED"
                         echo "========================================="
 
+                        if (!oldImage || oldImage == "NONE") {
+                            error(
+                                "Health check failed, but no previous Docker image is available for rollback."
+                            )
+                        }
+
                         echo "Starting automatic rollback..."
                         echo "Rollback image: ${oldImage}"
 
@@ -193,7 +211,7 @@ pipeline {
                         bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
 
                         /*
-                         * Restore previous version.
+                         * Restore previous image.
                          */
                         bat """
                             docker run -d ^
@@ -221,7 +239,8 @@ pipeline {
                         echo "========================================="
 
                         /*
-                         * Deployment failed, even though rollback succeeded.
+                         * Rollback succeeded, but deployment failed.
+                         * Therefore Jenkins must finish as FAILURE.
                          */
                         error(
                             "Deployment failed. Automatic rollback completed successfully."
