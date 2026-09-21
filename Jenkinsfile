@@ -48,12 +48,17 @@ pipeline {
         stage('Identify Git Commit') {
             steps {
                 script {
-                    def commit = bat(
-                        script: 'git rev-parse HEAD',
-                        returnStdout: true
-                    ).trim()
+                    def commitFile = "git-commit.txt"
+
+                    bat """
+                        git rev-parse HEAD > ${commitFile}
+                    """
+
+                    def commit = readFile(commitFile).trim()
 
                     echo "Selected Git commit: ${commit}"
+
+                    bat "del /q ${commitFile} >nul 2>&1 || exit /b 0"
                 }
             }
         }
@@ -61,10 +66,15 @@ pipeline {
         stage('Validate Version') {
             steps {
                 script {
-                    def tagExists = bat(
-                        script: "git tag -l v${params.VERSION}",
-                        returnStdout: true
-                    ).trim()
+                    def tagFile = "git-tag.txt"
+
+                    bat """
+                        git tag -l v${params.VERSION} > ${tagFile}
+                    """
+
+                    def tagExists = readFile(tagFile).trim()
+
+                    bat "del /q ${tagFile} >nul 2>&1 || exit /b 0"
 
                     if (!tagExists) {
                         error("Git tag v${params.VERSION} does not exist")
@@ -98,6 +108,7 @@ pipeline {
                 script {
                     def containerName = "retail-app-uat"
                     def networkName = "retail-network"
+                    def oldImage = "NONE"
 
                     /*
                      * Check whether the current container exists.
@@ -107,18 +118,19 @@ pipeline {
                         returnStatus: true
                     )
 
-                    def oldImage = "NONE"
-
-                    /*
-                     * If the container exists, get its image.
-                     */
                     if (containerExists == 0) {
-                        oldImage = bat(
-                            script: "docker inspect --format=\"{{.Config.Image}}\" ${containerName}",
-                            returnStdout: true
-                        ).trim()
 
-                        echo "Docker inspect returned: ${oldImage}"
+                        /*
+                         * Write only the Docker image name
+                         * into a temporary file.
+                         */
+                        bat """
+                            docker inspect --format="{{.Config.Image}}" ${containerName} > old-image.txt
+                        """
+
+                        oldImage = readFile("old-image.txt").trim()
+
+                        bat "del /q old-image.txt >nul 2>&1 || exit /b 0"
                     }
 
                     if (!oldImage || oldImage == "") {
@@ -129,7 +141,7 @@ pipeline {
                     echo "New image: retail-app:${params.VERSION}"
 
                     /*
-                     * Store previous image for rollback.
+                     * Save previous image for automatic rollback.
                      */
                     env.OLD_IMAGE = oldImage
 
@@ -138,17 +150,21 @@ pipeline {
                     echo "Host port: 8081"
 
                     /*
-                     * Make sure network exists.
+                     * Create network if it does not exist.
                      */
-                    bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
+                    bat """
+                        docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}
+                    """
 
                     /*
                      * Remove current container.
                      */
-                    bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
+                    bat """
+                        docker rm -f ${containerName} >nul 2>&1 || exit /b 0
+                    """
 
                     /*
-                     * Start requested version.
+                     * Start new version.
                      */
                     bat """
                         docker run -d ^
@@ -208,7 +224,9 @@ pipeline {
                         /*
                          * Remove failed version.
                          */
-                        bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
+                        bat """
+                            docker rm -f ${containerName} >nul 2>&1 || exit /b 0
+                        """
 
                         /*
                          * Restore previous image.
@@ -227,7 +245,7 @@ pipeline {
                         echo "Waiting for rollback health check..."
 
                         /*
-                         * Validate restored version.
+                         * Verify restored version.
                          */
                         bat """
                             powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Rollback health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
@@ -239,8 +257,8 @@ pipeline {
                         echo "========================================="
 
                         /*
-                         * Rollback succeeded, but deployment failed.
-                         * Therefore Jenkins must finish as FAILURE.
+                         * Deployment failed, therefore Jenkins must
+                         * finish with FAILURE even though rollback worked.
                          */
                         error(
                             "Deployment failed. Automatic rollback completed successfully."
@@ -265,9 +283,13 @@ pipeline {
                     echo "Starting manual rollback..."
                     echo "Rollback image: retail-app:${params.VERSION}"
 
-                    bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
+                    bat """
+                        docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}
+                    """
 
-                    bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
+                    bat """
+                        docker rm -f ${containerName} >nul 2>&1 || exit /b 0
+                    """
 
                     bat """
                         docker run -d ^
