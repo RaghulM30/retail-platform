@@ -100,8 +100,7 @@ pipeline {
                     def networkName = "retail-network"
 
                     /*
-                     * Record currently running image before deployment.
-                     * If no container exists, use NONE.
+                     * Record currently running image.
                      */
                     def oldImage = bat(
                         script: "docker inspect --format=\"{{.Config.Image}}\" ${containerName} 2>nul || echo NONE",
@@ -110,6 +109,11 @@ pipeline {
 
                     echo "Previous UAT image: ${oldImage}"
                     echo "New image: retail-app:${params.VERSION}"
+
+                    /*
+                     * Save previous image for rollback.
+                     */
+                    env.OLD_IMAGE = oldImage
 
                     echo "Container: ${containerName}"
                     echo "Network: ${networkName}"
@@ -121,12 +125,12 @@ pipeline {
                     bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
 
                     /*
-                     * Remove existing container.
+                     * Remove current container.
                      */
                     bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
 
                     /*
-                     * Start requested version.
+                     * Start new version.
                      */
                     bat """
                         docker run -d ^
@@ -145,7 +149,7 @@ pipeline {
             }
         }
 
-        stage('Health Check') {
+        stage('Health Check and Automatic Rollback') {
             when {
                 expression {
                     params.DEPLOYMENT_ACTION == 'DEPLOY'
@@ -155,19 +159,76 @@ pipeline {
             steps {
                 script {
                     def containerName = "retail-app-uat"
+                    def networkName = "retail-network"
+                    def oldImage = env.OLD_IMAGE
 
-                    echo "Waiting for application health check..."
+                    try {
 
-                    bat """
-                        powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
-                    """
+                        echo "Waiting for application health check..."
 
-                    echo "Application health check PASSED"
+                        bat """
+                            powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
+                        """
+
+                        echo "Application health check PASSED"
+
+                    } catch (Exception e) {
+
+                        echo "========================================="
+                        echo "HEALTH CHECK FAILED"
+                        echo "========================================="
+
+                        if (oldImage == "NONE" || oldImage == "") {
+                            error("Health check failed and no previous image is available for rollback.")
+                        }
+
+                        echo "Starting automatic rollback..."
+                        echo "Rollback image: ${oldImage}"
+
+                        /*
+                         * Remove failed new version.
+                         */
+                        bat "docker rm -f ${containerName} >nul 2>&1 || exit /b 0"
+
+                        /*
+                         * Restore previous version.
+                         */
+                        bat """
+                            docker run -d ^
+                            --name ${containerName} ^
+                            --network ${networkName} ^
+                            -p 8081:8081 ^
+                            ${oldImage}
+                        """
+
+                        bat "docker ps"
+
+                        echo "Previous version started: ${oldImage}"
+                        echo "Checking rollback health..."
+
+                        /*
+                         * Validate restored version.
+                         */
+                        bat """
+                            powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Rollback health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
+                        """
+
+                        echo "========================================="
+                        echo "ROLLBACK SUCCESSFUL"
+                        echo "Restored image: ${oldImage}"
+                        echo "========================================="
+
+                        /*
+                         * Deployment failed even though rollback succeeded.
+                         * This keeps the Jenkins build status FAILURE.
+                         */
+                        error("Deployment failed. Automatic rollback completed successfully.")
+                    }
                 }
             }
         }
 
-        stage('Rollback') {
+        stage('Manual Rollback') {
             when {
                 expression {
                     params.DEPLOYMENT_ACTION == 'ROLLBACK'
@@ -180,7 +241,7 @@ pipeline {
                     def networkName = "retail-network"
 
                     echo "Starting manual rollback..."
-                    echo "Rollback version: ${params.VERSION}"
+                    echo "Rollback image: retail-app:${params.VERSION}"
 
                     bat "docker network inspect ${networkName} >nul 2>&1 || docker network create ${networkName}"
 
@@ -196,12 +257,12 @@ pipeline {
 
                     bat "docker ps"
 
-                    echo "Rollback container started."
+                    echo "Manual rollback container started."
                 }
             }
         }
 
-        stage('Rollback Health Check') {
+        stage('Manual Rollback Health Check') {
             when {
                 expression {
                     params.DEPLOYMENT_ACTION == 'ROLLBACK'
@@ -212,13 +273,13 @@ pipeline {
                 script {
                     def containerName = "retail-app-uat"
 
-                    echo "Checking rollback health..."
+                    echo "Checking manual rollback health..."
 
                     bat """
                         powershell -Command "\$deadline=(Get-Date).AddSeconds(60); do { \$status=docker inspect --format='{{.State.Health.Status}}' ${containerName}; Write-Host \\"Rollback health status: \$status\\"; if (\$status -eq 'healthy') { exit 0 }; if (\$status -eq 'unhealthy') { exit 1 }; Start-Sleep -Seconds 5 } while ((Get-Date) -lt \$deadline); exit 1"
                     """
 
-                    echo "Rollback health check PASSED"
+                    echo "Manual rollback health check PASSED"
                 }
             }
         }
@@ -231,6 +292,7 @@ pipeline {
 
         failure {
             echo "Pipeline failed."
+            echo "Check whether automatic rollback was completed successfully."
         }
     }
 }
