@@ -8,10 +8,12 @@ FEATURE = "Customer Search"
 class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-        if self.path == "/payment":
-            response = "Payment Service: FIXED - Payment processing is working"
-        else:
-            response = f"Retail Platform - Version {VERSION} - {ENVIRONMENT} - {FEATURE}"
+        if self.path == "/customers":
+    		response = "Customer Search Service - Ready"
+	elif self.path == "/payment":
+    		response = "Payment Service: FIXED - Payment processing is working"
+	else:
+    		response = f"Retail Platform - Version {VERSION} - {ENVIRONMENT} - {FEATURE}"
 
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
