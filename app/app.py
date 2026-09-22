@@ -1,4 +1,5 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 VERSION = "4.2.0"
 ENVIRONMENT = "DEVELOPMENT"
@@ -14,8 +15,16 @@ CUSTOMERS = [
 class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-        if self.path == "/customers":
-    		response = "Customer Search Service - Ready"
+        if self.path.startswith("/customers"):
+    query = parse_qs(urlparse(self.path).query).get("name", [""])[0].lower()
+
+    results = [
+        customer["name"]
+        for customer in CUSTOMERS
+        if query in customer["name"].lower()
+    ]
+
+    response = "Customers: " + ", ".join(results) if results else "No customers found"
 	elif self.path == "/payment":
     		response = "Payment Service: FIXED - Payment processing is working"
 	else:
