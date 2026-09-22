@@ -4,6 +4,12 @@ VERSION = "4.2.0"
 ENVIRONMENT = "DEVELOPMENT"
 FEATURE = "Customer Search"
 
+CUSTOMERS = [
+    {"id": 1, "name": "Raghul", "email": "raghul@example.com"},
+    {"id": 2, "name": "Arun", "email": "arun@example.com"},
+    {"id": 3, "name": "Priya", "email": "priya@example.com"}
+]
+
 
 class Handler(BaseHTTPRequestHandler):
 
