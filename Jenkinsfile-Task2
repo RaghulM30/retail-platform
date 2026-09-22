@@ -1,0 +1,527 @@
+pipeline {
+
+    agent any
+
+    parameters {
+
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['DEV', 'UAT', 'PRODUCTION'],
+            description: 'Target deployment environment'
+        )
+
+        choice(
+            name: 'ACTION',
+            choices: ['DEPLOY', 'ROLLBACK'],
+            description: 'Deployment action'
+        )
+
+        string(
+            name: 'VERSION',
+            defaultValue: '4.3.0',
+            description: 'Application version'
+        )
+
+        choice(
+            name: 'RUN_TESTS',
+            choices: ['YES', 'NO'],
+            description: 'Run deployment validation tests'
+        )
+
+        choice(
+            name: 'CONFIRM_PROD',
+            choices: ['NO', 'YES'],
+            description: 'Required YES for production deployment'
+        )
+    }
+
+    environment {
+        GIT_REPO = 'https://github.com/RaghulM30/retail-platform.git'
+        IMAGE_NAME = 'customer-app'
+    }
+
+    stages {
+
+        stage('Resolve Environment Configuration') {
+            steps {
+                script {
+
+                    if (params.ENVIRONMENT == 'DEV') {
+
+                        env.GIT_BRANCH_NAME = 'develop'
+                        env.APP_NAME = 'customer-app-dev'
+                        env.APP_PORT = '8081'
+                        env.NETWORK_NAME = 'customer-dev-net'
+                        env.DB_NAME = 'customer-db-dev'
+                        env.DB_VOLUME = 'customer-db-dev-data'
+                        env.CANDIDATE_PORT = '9081'
+
+                    } else if (params.ENVIRONMENT == 'UAT') {
+
+                        env.GIT_BRANCH_NAME = 'release/4.3.0'
+                        env.APP_NAME = 'customer-app-uat'
+                        env.APP_PORT = '8082'
+                        env.NETWORK_NAME = 'customer-uat-net'
+                        env.DB_NAME = 'customer-db-uat'
+                        env.DB_VOLUME = 'customer-db-uat-data'
+                        env.CANDIDATE_PORT = '9082'
+
+                    } else if (params.ENVIRONMENT == 'PRODUCTION') {
+
+                        env.GIT_BRANCH_NAME = 'main'
+                        env.APP_NAME = 'customer-app-prod'
+                        env.APP_PORT = '8083'
+                        env.NETWORK_NAME = 'customer-prod-net'
+                        env.DB_NAME = 'customer-db-prod'
+                        env.DB_VOLUME = 'customer-db-prod-data'
+                        env.CANDIDATE_PORT = '9083'
+
+                    } else {
+
+                        error("Invalid environment selected")
+                    }
+
+                    echo "========================================"
+                    echo "DEPLOYMENT CONFIGURATION"
+                    echo "========================================"
+                    echo "Environment : ${params.ENVIRONMENT}"
+                    echo "Action      : ${params.ACTION}"
+                    echo "Version     : ${params.VERSION}"
+                    echo "Git Branch  : ${env.GIT_BRANCH_NAME}"
+                    echo "Application : ${env.APP_NAME}"
+                    echo "Port        : ${env.APP_PORT}"
+                    echo "Network     : ${env.NETWORK_NAME}"
+                    echo "Database    : ${env.DB_NAME}"
+                    echo "DB Volume   : ${env.DB_VOLUME}"
+                    echo "========================================"
+                }
+            }
+        }
+
+
+        stage('Validate Deployment Rules') {
+            steps {
+                script {
+
+                    if (params.VERSION.trim() == '') {
+                        error("VERSION cannot be empty")
+                    }
+
+                    if (params.ENVIRONMENT == 'PRODUCTION'
+                        && params.ACTION == 'DEPLOY'
+                        && params.CONFIRM_PROD != 'YES') {
+
+                        error("PRODUCTION deployment blocked. CONFIRM_PROD must be YES.")
+                    }
+
+                    echo "Deployment rules validated."
+                }
+            }
+        }
+
+
+        stage('Checkout Source') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+                bat """
+                    git fetch --all --tags
+                    git reset --hard
+                    git clean -fd
+                    git checkout ${GIT_BRANCH_NAME}
+                    git pull origin ${GIT_BRANCH_NAME}
+                """
+
+                echo "Checked out branch: ${GIT_BRANCH_NAME}"
+            }
+        }
+
+
+        stage('Identify Git Commit') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+                script {
+
+                    bat """
+                        git rev-parse HEAD > git-commit.txt
+                    """
+
+                    def commit = readFile('git-commit.txt').trim()
+
+                    echo "========================================"
+                    echo "SELECTED GIT COMMIT"
+                    echo "${commit}"
+                    echo "========================================"
+
+                    bat """
+                        del /q git-commit.txt >nul 2>&1 || exit /b 0
+                    """
+                }
+            }
+        }
+
+
+        stage('Prepare Docker Network') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+                bat """
+                    docker network inspect ${NETWORK_NAME} >nul 2>&1 || docker network create ${NETWORK_NAME}
+                """
+
+                echo "Docker network ready: ${NETWORK_NAME}"
+            }
+        }
+
+
+        stage('Prepare Database') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'customer-db-credentials',
+                        usernameVariable: 'DB_USER',
+                        passwordVariable: 'DB_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        docker volume inspect ${DB_VOLUME} >nul 2>&1 || docker volume create ${DB_VOLUME}
+
+                        docker rm -f ${DB_NAME} >nul 2>&1 || exit /b 0
+
+                        docker run -d ^
+                        --name ${DB_NAME} ^
+                        --network ${NETWORK_NAME} ^
+                        -e MYSQL_ROOT_PASSWORD=%DB_PASSWORD% ^
+                        -e MYSQL_DATABASE=customerdb ^
+                        -e MYSQL_USER=%DB_USER% ^
+                        -e MYSQL_PASSWORD=%DB_PASSWORD% ^
+                        -v ${DB_VOLUME}:/var/lib/mysql ^
+                        mysql:8.0
+                    """
+                }
+
+                echo "Database container started: ${DB_NAME}"
+            }
+        }
+
+
+        stage('Build Docker Image') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+
+                bat """
+                    docker build ^
+                    -t ${IMAGE_NAME}:${params.VERSION} ^
+                    .
+                """
+
+                echo "Docker image created: ${IMAGE_NAME}:${params.VERSION}"
+            }
+        }
+
+
+        stage('Start Candidate Application') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'customer-db-credentials',
+                        usernameVariable: 'DB_USER',
+                        passwordVariable: 'DB_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        docker rm -f ${APP_NAME}-candidate >nul 2>&1 || exit /b 0
+
+                        docker run -d ^
+                        --name ${APP_NAME}-candidate ^
+                        --network ${NETWORK_NAME} ^
+                        -p ${CANDIDATE_PORT}:8081 ^
+                        -e APP_VERSION=${params.VERSION} ^
+                        -e APP_ENV=${params.ENVIRONMENT} ^
+                        -e DB_HOST=${DB_NAME} ^
+                        -e DB_NAME=customerdb ^
+                        -e DB_USER=%DB_USER% ^
+                        -e DB_PASSWORD=%DB_PASSWORD% ^
+                        ${IMAGE_NAME}:${params.VERSION}
+                    """
+                }
+
+                echo "Candidate application started."
+            }
+        }
+
+
+        stage('Candidate Health Check') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    def healthy = false
+
+                    for (int i = 0; i < 12; i++) {
+
+                        bat """
+                            docker inspect --format="{{.State.Health.Status}}" ${APP_NAME}-candidate
+                        """
+
+                        def result = bat(
+                            script: """
+                                docker inspect --format="{{.State.Health.Status}}" ${APP_NAME}-candidate
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        echo "Candidate health: ${result}"
+
+                        if (result == 'healthy') {
+                            healthy = true
+                            break
+                        }
+
+                        sleep 5
+                    }
+
+                    if (!healthy) {
+
+                        echo "Candidate health check FAILED."
+
+                        bat """
+                            docker logs ${APP_NAME}-candidate
+                            docker rm -f ${APP_NAME}-candidate
+                        """
+
+                        error("Candidate deployment failed health check.")
+                    }
+
+                    echo "Candidate application is HEALTHY."
+                }
+            }
+        }
+
+
+        stage('Database Connectivity Test') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY' &&
+                    params.RUN_TESTS == 'YES'
+                }
+            }
+
+            steps {
+
+                bat """
+                    docker exec ${APP_NAME}-candidate python -c "import socket; s=socket.create_connection(('${DB_NAME}',3306),5); print('DATABASE CONNECTION: SUCCESS'); s.close()"
+                """
+            }
+        }
+
+
+        stage('Application Validation') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY' &&
+                    params.RUN_TESTS == 'YES'
+                }
+            }
+
+            steps {
+
+                bat """
+                    curl -f http://localhost:${CANDIDATE_PORT}/customers
+                    curl -f "http://localhost:${CANDIDATE_PORT}/customers?name=Raghul"
+                """
+
+                echo "Application validation successful."
+            }
+        }
+
+
+        stage('Promote Candidate') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    def oldImage = ""
+
+                    bat """
+                        docker inspect --format="{{.Config.Image}}" ${APP_NAME} > previous-image.txt 2>nul || exit /b 0
+                    """
+
+                    if (fileExists('previous-image.txt')) {
+                        oldImage = readFile('previous-image.txt').trim()
+                    }
+
+                    echo "Previous image: ${oldImage}"
+
+                    bat """
+                        docker rm -f ${APP_NAME} >nul 2>&1 || exit /b 0
+
+                        docker rm -f ${APP_NAME}-candidate >nul 2>&1 || exit /b 0
+                    """
+
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'customer-db-credentials',
+                            usernameVariable: 'DB_USER',
+                            passwordVariable: 'DB_PASSWORD'
+                        )
+                    ]) {
+
+                        bat """
+                            docker run -d ^
+                            --name ${APP_NAME} ^
+                            --network ${NETWORK_NAME} ^
+                            -p ${APP_PORT}:8081 ^
+                            -e APP_VERSION=${params.VERSION} ^
+                            -e APP_ENV=${params.ENVIRONMENT} ^
+                            -e DB_HOST=${DB_NAME} ^
+                            -e DB_NAME=customerdb ^
+                            -e DB_USER=%DB_USER% ^
+                            -e DB_PASSWORD=%DB_PASSWORD% ^
+                            ${IMAGE_NAME}:${params.VERSION}
+                        """
+                    }
+
+                    echo "========================================"
+                    echo "DEPLOYMENT SUCCESSFUL"
+                    echo "Application : ${APP_NAME}"
+                    echo "Version     : ${params.VERSION}"
+                    echo "Environment : ${params.ENVIRONMENT}"
+                    echo "========================================"
+                }
+            }
+        }
+
+
+        stage('Final Health Check') {
+            when {
+                expression {
+                    params.ACTION == 'DEPLOY'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    sleep 5
+
+                    def status = bat(
+                        script: """
+                            docker inspect --format="{{.State.Health.Status}}" ${APP_NAME}
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Final application health: ${status}"
+
+                    if (status != 'healthy') {
+                        error("FINAL HEALTH CHECK FAILED.")
+                    }
+
+                    bat """
+                        curl -f http://localhost:${APP_PORT}/customers
+                    """
+
+                    echo "Final deployment validation successful."
+                }
+            }
+        }
+
+
+        stage('Rollback') {
+            when {
+                expression {
+                    params.ACTION == 'ROLLBACK'
+                }
+            }
+
+            steps {
+
+                echo "Starting rollback for ${APP_NAME}"
+
+                bat """
+                    docker rm -f ${APP_NAME} >nul 2>&1 || exit /b 0
+                """
+
+                echo "Current application container removed."
+                echo "Rollback requires the previously deployed image to be restored."
+            }
+        }
+    }
+
+
+    post {
+
+        success {
+            echo "========================================"
+            echo "PIPELINE RESULT: SUCCESS"
+            echo "Environment: ${params.ENVIRONMENT}"
+            echo "Version: ${params.VERSION}"
+            echo "========================================"
+        }
+
+        failure {
+            echo "========================================"
+            echo "PIPELINE RESULT: FAILURE"
+            echo "Environment: ${params.ENVIRONMENT}"
+            echo "Version: ${params.VERSION}"
+            echo "Check Jenkins console for failure details."
+            echo "========================================"
+
+            bat """
+                docker ps -a
+            """
+        }
+
+        always {
+            echo "Pipeline execution completed."
+        }
+    }
+}
