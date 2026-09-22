@@ -5,6 +5,12 @@ VERSION = "4.2.0"
 ENVIRONMENT = "DEVELOPMENT"
 FEATURE = "Customer Search"
 
+import os
+
+DB_HOST = os.getenv("DB_HOST", "customer-db-uat")
+DB_NAME = os.getenv("DB_NAME", "customerdb")
+DB_USER = os.getenv("DB_USER", "customeruser")
+
 CUSTOMERS = [
     {"id": 1, "name": "Raghul", "email": "raghul@example.com"},
     {"id": 2, "name": "Arun", "email": "arun@example.com"},
@@ -24,7 +30,12 @@ class Handler(BaseHTTPRequestHandler):
         if query in customer["name"].lower()
     ]
 
-    response = "Customers: " + ", ".join(results) if results else "No customers found"
+    response = (
+    "DB_HOST=" + DB_HOST +
+    " | Customers: " + ", ".join(results)
+    if results
+    else "DB_HOST=" + DB_HOST + " | No customers found"
+)
 	elif self.path == "/payment":
     		response = "Payment Service: FIXED - Payment processing is working"
 	else:
