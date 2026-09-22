@@ -45,24 +45,6 @@ pipeline {
             }
         }
 
-        stage('Identify Git Commit') {
-            steps {
-                script {
-                    def commitFile = "git-commit.txt"
-
-                    bat """
-                        git rev-parse HEAD > ${commitFile}
-                    """
-
-                    def commit = readFile(commitFile).trim()
-
-                    echo "Selected Git commit: ${commit}"
-
-                    bat "del /q ${commitFile} >nul 2>&1 || exit /b 0"
-                }
-            }
-        }
-
         stage('Validate Version') {
             steps {
                 script {
@@ -84,6 +66,38 @@ pipeline {
                 }
             }
         }
+	stage('Checkout Requested Version') {
+    steps {
+        script {
+            echo "Checking out requested version: v${params.VERSION}"
+
+            bat """
+                git fetch --tags
+                git checkout --detach v${params.VERSION}
+            """
+
+            echo "Checked out Git tag: v${params.VERSION}"
+        }
+    }
+}
+stage('Identify Git Commit') {
+            steps {
+                script {
+                    def commitFile = "git-commit.txt"
+
+                    bat """
+                        git rev-parse HEAD > ${commitFile}
+                    """
+
+                    def commit = readFile(commitFile).trim()
+
+                    echo "Selected Git commit: ${commit}"
+
+                    bat "del /q ${commitFile} >nul 2>&1 || exit /b 0"
+                }
+            }
+        }
+
 
         stage('Docker Build') {
             when {
